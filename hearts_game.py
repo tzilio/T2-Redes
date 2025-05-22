@@ -1,339 +1,324 @@
-#!/usr/bin/env python3
-import socket
-import sys
-import time
-import json
-import random
-from ring_network import *
+import json, random, socket, sys, time
+from ring_network import *          # NODES e setup_socket
 
-# Ordem de exibição: ranks 2→A, naipes: copas, espadas, ouro, paus
+# Ordem de exibição: ranks 2 - A, naipes: copas, espadas, ouros, paus
 RANKS = ["2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K", "A"]
 SUITS = ["♥", "♠", "♦", "♣"]
 RANK_INDEX = {r: i for i, r in enumerate(RANKS)}
 SUIT_INDEX = {s: i for i, s in enumerate(SUITS)}
 
-# Variáveis compartilhadas entre funções
-hand = []
-token_sent = [False]
-pass_done = [False]
-received_pass = []
+# Estado global simples
+hand: list[str] = []
+token_sent  = [False]
+pass_done   = [False]
 received_from = [False]
-NEXT_ADDR = None
+received_pass: list[str] = []
+NEXT_ADDR   = None
 
-current_trick = []       # Cartas jogadas na rodada atual
-round_number = [0]       # Número da rodada (vai até 13)
-starter_id = [None]      # Quem iniciou a rodada
-playing = [False]        # Se estamos na fase de jogo
-
-player_points = [0] * 4
+current_trick: list[tuple[int, str]] = []
+round_number = [0]
+starter_id   = [None]
+player_points = [0, 0, 0, 0]
 
 
+# ---------- utilidades locais ---------- #
 def sort_hand(cards):
-    return sorted(cards, key=lambda card: (
-        SUIT_INDEX[card[-1]],
-        RANK_INDEX[card[:-1]]
-    ))
+    return sorted(cards, key=lambda c: (SUIT_INDEX[c[-1]], RANK_INDEX[c[:-1]]))
 
 def print_hand(cards):
-    formatted = [f"{c:>3}" for c in cards]
-    indices = [f"{i:>3}" for i in range(len(cards))]
-    print("   " + " ".join(formatted))
-    print("   " + " ".join(indices))
+    cols = [f"{c:>3}" for c in cards]
+    idxs = [f"{i:>3}" for i in range(len(cards))]
+    print("   " + " ".join(cols))
+    print("   " + " ".join(idxs))
 
-def deal_cards(sock, next_addr):
+def count_points(trick):
+    pts = 0
+    for _, card in trick:
+        if card[-1] == "♥":
+            pts += 1
+        elif card == "Q♠":
+            pts += 13
+    return pts
+
+def print_trick_state(trick):
+    state = ['--'] * 4
+    for pid, card in trick:
+        state[pid] = card
+    print("Cartas na trick: [ " + " | ".join(state) + " ]")
+
+def banner(text: str, char: str = "-"):
+    print("\n" + char * 40)
+    print(f"{text}")
+    print(char * 40)
+
+# ---------- fase DEAL ---------- #
+def deal_cards(sock):
     deck = [rank + suit for suit in SUITS for rank in RANKS]
     random.shuffle(deck)
-    hands = [deck[i*13:(i+1)*13] for i in range(4)]
-    print("[Node 0] Embaralhando e enviando DEALs…")
-    for target_id, cards in enumerate(hands):
+    for pid in range(4):
         packet = {
             "type": "DEAL",
             "origin": 0,
-            "target": target_id,
-            "cards": cards
+            "target": pid,
+            "cards": deck[pid*13:(pid+1)*13]
         }
-        sock.sendto(json.dumps(packet).encode(), next_addr)
-
-def count_points(trick):
-    total = 0
-    for _, card in trick:
-        if card[-1] == "♥":
-            total += 1
-        elif card == "Q♠":
-            total += 13
-    return total
-
-
-def inject_token(sock, local_addr):
-    token_pkt = {"type": "TOKEN"}
-    sock.sendto(json.dumps(token_pkt).encode(), local_addr)
-    print("[Node 0] Token INJETADO — começa o PASS aqui.")
-
-def handle_deal(packet, node_id, sock, local_addr, next_addr):
-    global hand, token_sent
-    origin = packet["origin"]
-    target = packet["target"]
-    cards = packet["cards"]
-
-    if target == node_id:
-        hand[:] = cards
-        print(f"[Node {node_id}] RECEBEU DEAL — mão inicial:")
-        print_hand(sort_hand(hand))
-
-    if origin != node_id:
-        sock.sendto(json.dumps(packet).encode(), next_addr)
-    else:
-        if node_id == 0 and not token_sent[0]:
-            inject_token(sock, local_addr)
-            token_sent[0] = True
-
-def choose_cards_to_pass():
-    global hand
-    ordered_hand = sort_hand(hand)
-    print("\nEscolha 3 cartas para passar (índices separados por espaço):")
-    print_hand(ordered_hand)
-
-    while True:
-        try:
-            indexes = list(map(int, input("> ").split()))
-            if len(indexes) == 3 and all(0 <= i < len(ordered_hand) for i in indexes):
-                selected = [ordered_hand[i] for i in indexes]
-                print(f"Você escolheu para passar: {selected}")
-                # Remover as cartas corretas da mão original
-                for card in selected:
-                    hand.remove(card)
-                return selected
-        except ValueError:
-            pass
-        print("Entrada Inválida. Tente Novamente.")
-
-
-def handle_token(packet, node_id, sock):
-    global playing, round_number, starter_id, current_trick
-
-    phase = packet.get("phase", "pass")
-
-    if phase == "pass":
-        if not pass_done[0]:
-            selected = choose_cards_to_pass()
-            to = (node_id + 1) % 4
-            packet = {
-                "type": "PASS",
-                "from": node_id,
-                "to": to,
-                "cards": selected
-            }
-            sock.sendto(json.dumps(packet).encode(), NEXT_ADDR)
-            pass_done[0] = True
-
-    elif phase == "play":
-        playing[0] = True
-        starter_id[0] = packet["starter"]
-        round_number[0] = packet["round"]
-        current_trick = packet["trick"]
-
-        if len(current_trick) < 4:
-            if (starter_id[0] + len(current_trick)) % 4 == node_id:
-                card = choose_play()
-                hand.remove(card)
-                current_trick.append((node_id, card))
-
-                print(f"[Node {node_id}] JOGOU: {card}")
-
-                new_token = {
-                    "type": "TOKEN",
-                    "phase": "play",
-                    "starter": starter_id[0],
-                    "round": round_number[0],
-                    "trick": current_trick
-                }
-                sock.sendto(json.dumps(new_token).encode(), NEXT_ADDR)
-            else:
-                sock.sendto(json.dumps(packet).encode(), NEXT_ADDR)
-        else:
-            print(f"\n=== Rodada {round_number[0]} encerrada ===")
-            print(f"Jogador que começou: {starter_id[0]}")
-            for pid, card in current_trick:
-                print(f"Jogador {pid} jogou {card}")
-
-            winner = determine_trick_winner(current_trick)
-
-            summary = {
-                "type": "ROUND_SUMMARY",
-                "starter": starter_id[0],
-                "trick": current_trick,
-                "winner": winner,
-                "origin": node_id
-            }
-            sock.sendto(json.dumps(summary).encode(), NEXT_ADDR)
-
-            # inicia próxima rodada
-            next_round = {
-                "type": "TOKEN",
-                "phase": "play",
-                "starter": winner,
-                "round": round_number[0] + 1,
-                "trick": []
-            }
-            time.sleep(1)
-            sock.sendto(json.dumps(next_round).encode(), NEXT_ADDR)
-
-
-def handle_round_summary(packet, node_id, sock):
-    starter = packet["starter"]
-    trick = packet["trick"]
-    winner = packet["winner"]
-    origin = packet["origin"]
-
-    print(f"\n=== Rodada {round_number[0]} encerrada ===")
-    print(f"Jogador que começou: {starter}")
-    for pid, card in trick:
-        print(f"Jogador {pid} jogou {card}")
-    print(f"🏆 Jogador {winner} venceu a rodada")
-    print("===========================\n")
-
-    if origin != node_id:
         sock.sendto(json.dumps(packet).encode(), NEXT_ADDR)
 
 
-def handle_pass(packet, node_id, sock):
-    global hand, pass_done, received_pass, NEXT_ADDR, received_from
-    frm = packet["from"]
-    to = packet["to"]
-    cards = packet["cards"]
+def handle_deal(pkt, node_id, sock):
+    global hand
+    if pkt["target"] == node_id:
+        hand[:] = pkt["cards"]
+        banner(f"[Node {node_id}] MÃO INICIAL (DEAL)")
+        print_hand(sort_hand(hand))
 
-    if to == node_id:
-        received_pass[:] = cards
+    if pkt["origin"] != node_id:
+        sock.sendto(json.dumps(pkt).encode(), NEXT_ADDR)
+    elif node_id == 0 and not token_sent[0]:
+        tok = {"type": "TOKEN", "phase": "pass"}
+        sock.sendto(json.dumps(tok).encode(), NODES[0])
+        token_sent[0] = True
+
+
+# ---------- fase PASS ---------- #
+def choose_cards_to_pass():
+    ordered = sort_hand(hand)
+    print("\nEscolha 3 cartas p/ passar (ex.: 0 4 8):")
+    print_hand(ordered)
+    while True:
+        try:
+            idxs = list(map(int, input("> ").split()))
+            if len(idxs) == 3 and all(0 <= i < len(ordered) for i in idxs):
+                sel = [ordered[i] for i in idxs]
+                for card in sel:
+                    hand.remove(card)
+                print("Você vai passar:", sel)
+                return sel
+        except ValueError:
+            pass
+        print("Entrada inválida — tente de novo.")
+
+
+def handle_pass(pkt, node_id, sock):
+    global received_pass
+    if pkt["to"] == node_id:
+        received_pass = pkt["cards"]
         received_from[0] = True
 
         if not pass_done[0]:
-            selected = choose_cards_to_pass()
-            next_to = (node_id + 1) % 4
-            pass_packet = {
-                "type": "PASS",
-                "from": node_id,
-                "to": next_to,
-                "cards": selected
-            }
-            sock.sendto(json.dumps(pass_packet).encode(), NEXT_ADDR)
+            sel = choose_cards_to_pass()
+            nxt = (node_id + 1) % 4
+            new_pkt = {"type": "PASS", "from": node_id,
+                       "to": nxt, "cards": sel}
+            sock.sendto(json.dumps(new_pkt).encode(), NEXT_ADDR)
             pass_done[0] = True
 
         if pass_done[0] and received_from[0]:
-            print(f"[Node {node_id}] RECEBEU PASS de {frm}: {cards}")
+            print(f"\n[Node {node_id}] Recebeu do jogador {pkt['from']}: {received_pass}")
             hand.extend(received_pass)
 
-            # Se for o último jogador, inicia SHOW_HAND
             if node_id == 3:
-                show_pkt = {
-                    "type": "SHOW_HAND",
-                    "origin": node_id
-                }
-                sock.sendto(json.dumps(show_pkt).encode(), NEXT_ADDR)
+                sh = {"type": "SHOW_HAND", "origin": node_id}
+                sock.sendto(json.dumps(sh).encode(), NEXT_ADDR)
     else:
-        sock.sendto(json.dumps(packet).encode(), NEXT_ADDR)
+        sock.sendto(json.dumps(pkt).encode(), NEXT_ADDR)
 
 
-
-def handle_show_hand(packet, node_id, sock):
-    global NEXT_ADDR
-    origin = packet["origin"]
-
-    print(f"[Node {node_id}] MÃO ATUAL:")
+# ---------- mostrar mãos e iniciar jogo ---------- #
+def handle_show_hand(pkt, node_id, sock):
+    banner(f"[Node {node_id}] MÃO APÓS PASS")
     print_hand(sort_hand(hand))
 
-    if origin != node_id:
-        sock.sendto(json.dumps(packet).encode(), NEXT_ADDR)
-    else:
-        print(f"[Node {node_id}] Fim da exibição das mãos.")
+    if pkt["origin"] != node_id:
+        sock.sendto(json.dumps(pkt).encode(), NEXT_ADDR)
 
-    # Inicia a fase de jogo
     if "2♣" in hand:
         starter_id[0] = node_id
-        token_pkt = {
-            "type": "TOKEN",
-            "phase": "play",
-            "starter": node_id,
-            "round": 1,
-            "trick": []
-        }
-        sock.sendto(json.dumps(token_pkt).encode(), NEXT_ADDR)
+
+        starter_pkt = {"type": "STARTER", "player": node_id, "origin": node_id}
+        sock.sendto(json.dumps(starter_pkt).encode(), NEXT_ADDR)
+        time.sleep(0.1)
+
+        tok = {"type": "TOKEN", "phase": "play",
+               "starter": node_id, "round": 1, "trick": []}
+        sock.sendto(json.dumps(tok).encode(), NEXT_ADDR)
 
 
+def handle_starter(pkt, node_id, sock):
+    banner(f"Jogador {pkt['player']} começa a 1ª rodada (2♣)", "=")
+    if pkt["origin"] != node_id:
+        sock.sendto(json.dumps(pkt).encode(), NEXT_ADDR)
+
+
+# ---------- fase PLAY ---------- #
 def choose_play():
-    print("\nSua vez de jogar. Escolha o índice da carta:")
-    print_hand(sort_hand(hand))
+    print("\nSua vez de jogar — índice da carta:")
+    ordered = sort_hand(hand)
+    print_hand(ordered)
     while True:
         try:
             idx = int(input("> "))
-            if 0 <= idx < len(hand):
-                return sort_hand(hand)[idx]
+            if 0 <= idx < len(ordered):
+                return ordered[idx]
         except ValueError:
             pass
         print("Índice inválido.")
 
-
 def determine_trick_winner(trick):
-    lead_suit = trick[0][1][-1]  # naipe da primeira carta
-    valid_plays = [
-        (pid, card) for (pid, card) in trick if card[-1] == lead_suit
-    ]
-    # Compara os ranks apenas das cartas do mesmo naipe
-    winner = max(valid_plays, key=lambda x: RANK_INDEX[x[1][:-1]])
-    return winner[0]
+    lead_suit = trick[0][1][-1]
+    same_suit = [(pid, card) for pid, card in trick if card[-1] == lead_suit]
+    return max(same_suit, key=lambda x: RANK_INDEX[x[1][:-1]])[0]
 
+def handle_token(pkt, node_id, sock):
+    phase = pkt.get("phase")
+
+    # -------- PASS -------- #
+    if phase == "pass" and not pass_done[0]:
+        sel = choose_cards_to_pass()
+        to = (node_id + 1) % 4
+        p = {"type": "PASS", "from": node_id, "to": to, "cards": sel}
+        sock.sendto(json.dumps(p).encode(), NEXT_ADDR)
+        pass_done[0] = True
+
+    # -------- PLAY -------- #
+    elif phase == "play":
+        starter_id[0]   = pkt["starter"]
+        round_number[0] = pkt["round"]
+        trick           = pkt["trick"]
+
+        print_trick_state(trick)
+
+        if len(trick) < 4:
+            if (starter_id[0] + len(trick)) % 4 == node_id:
+                card = choose_play()
+                hand.remove(card)
+                trick.append((node_id, card))
+                print(f"[Node {node_id}] Jogou {card}")
+                print_trick_state(trick)
+
+            pkt["trick"] = trick
+            sock.sendto(json.dumps(pkt).encode(), NEXT_ADDR)
+
+        else:
+            winner = determine_trick_winner(trick)
+            pts    = count_points(trick)
+            player_points[winner] += pts
+
+            summary = {
+                "type": "ROUND_SUMMARY",
+                "starter": starter_id[0],
+                "trick": trick,
+                "winner": winner,
+                "add_points": pts,
+                "points": player_points.copy(),
+                "origin": node_id,
+                "round": round_number[0],
+            }
+            sock.sendto(json.dumps(summary).encode(), NEXT_ADDR)
+
+            if round_number[0] == 13:
+                game_over = {"type": "GAME_OVER",
+                             "points": player_points.copy(),
+                             "origin": node_id}
+                time.sleep(0.5)
+                sock.sendto(json.dumps(game_over).encode(), NEXT_ADDR)
+            else:
+                next_tok = {"type": "TOKEN", "phase": "play",
+                            "starter": winner,
+                            "round": round_number[0] + 1,
+                            "trick": []}
+                time.sleep(0.5)
+                sock.sendto(json.dumps(next_tok).encode(), NEXT_ADDR)
+
+
+def handle_round_summary(pkt, node_id, sock):
+    player_points[:] = pkt["points"]
+    r = pkt["round"]
+    banner(f"Fim da rodada {r}")
+    print(f"Jogador que começou: {pkt['starter']}")
+    for pid, card in pkt["trick"]:
+        print(f"  Jogador {pid} jogou {card}")
+    print(f"Vencedor da rodada: Jogador {pkt['winner']}  (+{pkt['add_points']} pts)")
+    print("Pontuação parcial:", player_points)
+
+    if pkt["origin"] != node_id:
+        sock.sendto(json.dumps(pkt).encode(), NEXT_ADDR)
+
+
+# ---------- fim de jogo ---------- #
+def handle_game_over(pkt, node_id, sock):
+    pts = pkt["points"]
+    winner = min(range(4), key=lambda p: pts[p])
+    banner("FIM DE JOGO", "#")
+    for pid, p in enumerate(pts):
+        print(f"Jogador {pid}: {p} pontos")
+    print(f"\n*** Vencedor: Jogador {winner} (menor pontuação) ***\n")
+
+    if pkt["origin"] != node_id:
+        sock.sendto(json.dumps(pkt).encode(), NEXT_ADDR)
+
+    if pkt["origin"] == node_id:
+        time.sleep(0.5)
+        bye = {"type": "EXIT"}
+        sock.sendto(json.dumps(bye).encode(), NEXT_ADDR)
 
 
 def handle_exit(node_id, data, sock):
-    global NEXT_ADDR
     sock.sendto(data, NEXT_ADDR)
-    print(f"[Node {node_id}] RECEBEU EXIT — encerrando.")
+    print(f"[Node {node_id}] Encerrando processo.")
+    return True
 
+
+# ---------- loop principal ---------- #
 def main():
     global NEXT_ADDR
-    # Validação de argumentos
     if len(sys.argv) != 2:
-        print(f"Uso: {sys.argv[0]} <node_id>")
+        print(f"Uso: {sys.argv[0]} <node_id 0-3>")
         sys.exit(1)
 
     node_id = int(sys.argv[1])
     if not 0 <= node_id < 4:
-        print("node_id inválido. Deve ser 0, 1, 2 ou 3.")
+        print("node_id deve ser 0,1,2 ou 3")
         sys.exit(1)
 
-    LOCAL_ADDR = NODES[node_id]
-    NEXT_ADDR = NODES[(node_id + 1) % 4]
-    sock = setup_socket(LOCAL_ADDR)
-    print(f"[Node {node_id}] em {LOCAL_ADDR}, next → {NEXT_ADDR}")
+    local_addr = NODES[node_id]
+    NEXT_ADDR  = NODES[(node_id + 1) % 4]
+    sock = setup_socket(local_addr)
+    banner(f"Node {node_id} online — próximo → {NEXT_ADDR}")
 
     if node_id == 0:
         time.sleep(1)
-        deal_cards(sock, NEXT_ADDR)
+        deal_cards(sock)
 
     while True:
-        data, _ = sock.recvfrom(4096)
+        data, _ = sock.recvfrom(8192)
         try:
             pkt = json.loads(data.decode())
         except json.JSONDecodeError:
             continue
 
-        pkt_type = pkt.get("type")
-
-        match pkt_type:
-            case "EXIT":
-                handle_exit(node_id, data, sock)
+        t = pkt.get("type")
+        if t == "DEAL":
+            handle_deal(pkt, node_id, sock)
+        elif t == "PASS":
+            handle_pass(pkt, node_id, sock)
+        elif t == "SHOW_HAND":
+            handle_show_hand(pkt, node_id, sock)
+        elif t == "STARTER":
+            handle_starter(pkt, node_id, sock)
+        elif t == "TOKEN":
+            handle_token(pkt, node_id, sock)
+        elif t == "ROUND_SUMMARY":
+            handle_round_summary(pkt, node_id, sock)
+        elif t == "GAME_OVER":
+            handle_game_over(pkt, node_id, sock)
+        elif t == "EXIT":
+            if handle_exit(node_id, data, sock):
                 break
-            case "DEAL":
-                handle_deal(pkt, node_id, sock, LOCAL_ADDR, NEXT_ADDR)
-            case "TOKEN":
-                handle_token(pkt, node_id, sock)
-            case "PASS":
-                handle_pass(pkt, node_id, sock)
-            case "SHOW_HAND":
-                handle_show_hand(pkt, node_id, sock)
-            case _:
-                sock.sendto(data, NEXT_ADDR)
+        else:
+            sock.sendto(data, NEXT_ADDR)
 
-    print(f"[Node {node_id}] saiu.")
+    sock.close()
 
 if __name__ == "__main__":
     main()
