@@ -152,7 +152,7 @@ def handle_starter(pkt, node_id, sock):
 
 # ---------- fase PLAY ---------- #
 def choose_play():
-    print("\nSua vez de jogar — índice da carta:")
+    print("\nSua vez de jogar - índice da carta:")
     ordered = sort_hand(hand)
     print_hand(ordered)
     while True:
@@ -204,29 +204,15 @@ def handle_token(pkt, node_id, sock):
             pts    = count_points(trick)
             player_points[winner] += pts
 
-            summary = {
-                "type": "ROUND_SUMMARY",
-                "starter": starter_id[0],
-                "trick": trick,
-                "winner": winner,
-                "add_points": pts,
-                "points": player_points.copy(),
-                "origin": node_id,
-                "round": round_number[0],
-            }
+            summary = { "type": "ROUND_SUMMARY", "starter": starter_id[0], "trick": trick, "winner": winner, "add_points": pts, "points": player_points.copy(), "origin": node_id, "round": round_number[0]}
             sock.sendto(json.dumps(summary).encode(), NEXT_ADDR)
 
             if round_number[0] == 13:
-                game_over = {"type": "GAME_OVER",
-                             "points": player_points.copy(),
-                             "origin": node_id}
+                game_over = {"type": "GAME_OVER", "points": player_points.copy(), "origin": node_id}
                 time.sleep(0.5)
                 sock.sendto(json.dumps(game_over).encode(), NEXT_ADDR)
             else:
-                next_tok = {"type": "TOKEN", "phase": "play",
-                            "starter": winner,
-                            "round": round_number[0] + 1,
-                            "trick": []}
+                next_tok = {"type": "TOKEN", "phase": "play", "starter": winner, "round": round_number[0] + 1, "trick": []}
                 time.sleep(0.5)
                 sock.sendto(json.dumps(next_tok).encode(), NEXT_ADDR)
 
@@ -284,7 +270,7 @@ def main():
     local_addr = NODES[node_id]
     NEXT_ADDR  = NODES[(node_id + 1) % 4]
     sock = setup_socket(local_addr)
-    banner(f"Node {node_id} online — próximo → {NEXT_ADDR}")
+    banner(f"Node {node_id} online - próximo -> {NEXT_ADDR}")
 
     if node_id == 0:
         time.sleep(1)
