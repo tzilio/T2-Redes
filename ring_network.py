@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 import socket, json
 
-NODES = [("127.0.0.1", 10000 + i) for i in range(4)]
+NODES = [
+    ('10.254.223.80', 10000),  # h52
+    ('10.254.223.81', 10001),  # h53
+    ('10.254.223.82', 10002),  # h54
+    ('10.254.223.83', 10003),  # h55
+]
 
 def setup_socket(bind_addr):
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
